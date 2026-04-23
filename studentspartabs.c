@@ -22,25 +22,28 @@
 #include <time.h>
 #include <omp.h>
 
-
 // Definições de constantes para o benchmark
 #define MAX_LINHAS_CSV 100
-#define NUM_EXECUCOES 10
+#define NUM_EXECUCOES 30
 #define NUM_PROCESSOS_ANALISE 5
 #define ARQ_PARAMETROS_TABELAS "parametros.csv"
 #define ARQ_SAIDA_TABELA "resultados_desempenho.csv"
 #define DEBUG 1
 
 // Funções utilitárias para estatística
-double calcularMedia(double tempos[], int n) {
+double calcularMedia(double tempos[], int n)
+{
     double soma = 0.0;
-    for(int i = 0; i < n; i++) soma += tempos[i];
+    for (int i = 0; i < n; i++)
+        soma += tempos[i];
     return soma / n;
 }
 
-double calcularDesvioPadrao(double tempos[], int n, double media) {
+double calcularDesvioPadrao(double tempos[], int n, double media)
+{
     double soma_quadrados = 0.0;
-    for(int i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++)
+    {
         soma_quadrados += (tempos[i] - media) * (tempos[i] - media);
     }
     return n > 1 ? sqrt(soma_quadrados / (n - 1)) : 0.0;
@@ -206,16 +209,21 @@ void create_average_table(int R, int C, int A, int N, int T, float avaliation_ta
 
 /**
  * @brief Calcula estatísticas por cidade usando médias de atividades.
+ *        Ao fim, determina também a melhor cidade em relação à média.
  *
  * @param R Número de regiões.
  * @param C Número de turmas.
  * @param A Número de atividades.
  * @param N Número de avaliações por atividade.
- * @param T Número de threads (não utilizado diretamente).
+ * @param T Número de threads.
  * @param average_table Tabela de médias de cada atividade.
  * @param city_stats Matriz de saída com min, max, mediana, média e desvio padrão.
+ * @param best_city_i Índice de região da melhor cidade (saída).
+ * @param best_city_j Índice de turma da melhor cidade (saída).
+ * @param best_city_avg Média da melhor cidade (saída).
  */
-void create_city_stats(int R, int C, int A, int N, int T, float average_table[restrict R][C][A], float city_stats[restrict R][C][5])
+void create_city_stats(int R, int C, int A, int N, int T, float average_table[restrict R][C][A], float city_stats[restrict R][C][5],
+                       int *best_city_i, int *best_city_j, float *best_city_avg)
 {
 // Abre a região paralela sem iniciar o loop 'for' ainda
 #pragma omp parallel num_threads(T)
@@ -257,11 +265,9 @@ void create_city_stats(int R, int C, int A, int N, int T, float average_table[re
                 }
 
                 // cálculo da mediana usando quickselect
-                // memcpy(temp_array, aux_array, A * sizeof(float));
                 if (A % 2 == 0)
                 {
-                    float m1 = quickselect(aux_array, 0, A - 1, A / 2); // procura o A/2-1 menor elemento
-                    // memcpy(temp_array, aux_array, A * sizeof(float));        //  precisa copiar novamente porque o quickselect modifica o array
+                    float m1 = quickselect(aux_array, 0, A - 1, A / 2);         // procura o A/2-1 menor elemento
                     float m2 = quickselect(aux_array, 0, A / 2 - 1, A / 2 - 1); // procura o A/2 menor elemento
                     median = (m1 + m2) / 2.0f;
                 }
@@ -272,16 +278,27 @@ void create_city_stats(int R, int C, int A, int N, int T, float average_table[re
 
                 // calculo do desvio padrão e da média e armazenamento dos resultados
                 double average = sum / A;
-                float stddev = sqrt(sum_sq - (sum * sum) / A);
+                float stddev = sqrt((sum_sq - (sum * sum) / A) / (A - 1));
                 city_stats[i][j][0] = min;
                 city_stats[i][j][1] = max;
                 city_stats[i][j][2] = median;
                 city_stats[i][j][3] = average;
                 city_stats[i][j][4] = stddev;
+
+                // Atualiza a melhor cidade usando seção crítica para evitar race condition
+#pragma omp critical
+                {
+                    if (average > *best_city_avg)
+                    {
+                        *best_city_avg = average;
+                        *best_city_i = i;
+                        *best_city_j = j;
+                    }
+                }
             }
         }
 
-        // 4. Libera a memória no final da região paralela (apenas T vezes)
+        // Libera a memória no final da região paralela (apenas T vezes)
         free(aux_array);
         free(temp_array);
     }
@@ -289,16 +306,20 @@ void create_city_stats(int R, int C, int A, int N, int T, float average_table[re
 
 /**
  * @brief Calcula estatísticas por região agregando todas as turmas e atividades.
+ *        Ao fim, determina também a melhor região em relação à média.
  *
  * @param R Número de regiões.
  * @param C Número de turmas.
  * @param A Número de atividades.
  * @param N Número de avaliações por atividade.
- * @param T Número de threads (não utilizado diretamente).
+ * @param T Número de threads.
  * @param average_table Tabela de médias de cada atividade.
  * @param region_stats Matriz de saída com min, max, mediana, média e desvio padrão.
+ * @param best_region_i Índice da melhor região (saída).
+ * @param best_region_avg Média da melhor região (saída).
  */
-void create_region_stats(int R, int C, int A, int N, int T, float average_table[restrict R][C][A], float region_stats[restrict R][5])
+void create_region_stats(int R, int C, int A, int N, int T, float average_table[restrict R][C][A], float region_stats[restrict R][5],
+                         int *best_region_i, float *best_region_avg)
 {
 // 1. Abre a região paralela (cria as T threads, mas ainda não inicia o loop)
 #pragma omp parallel num_threads(T)
@@ -334,8 +355,6 @@ void create_region_stats(int R, int C, int A, int N, int T, float average_table[
             {
                 float val = *(ptr_start + j);
 
-                // Otimização: Substituí o 'index++' por 'j'.
-                // Incrementar variáveis fora do escopo do 'for' quebra a vetorização SIMD estrita.
                 aux_array[j] = val;
 
                 sum += val;
@@ -347,11 +366,9 @@ void create_region_stats(int R, int C, int A, int N, int T, float average_table[
             }
 
             // mediana usando quickselect (reaproveitando a memória alocada fora do loop)
-            // memcpy(temp_array_region, aux_array, (C * A) * sizeof(float));
             if ((C * A) % 2 == 0)
             {
                 float m1 = quickselect(aux_array, 0, C * A - 1, C * A / 2);
-                // memcpy(temp_array_region, aux_array, (C * A) * sizeof(float));
                 float m2 = quickselect(aux_array, 0, C * A / 2 - 1, C * A / 2 - 1);
                 median = (m1 + m2) / 2.0f;
             }
@@ -362,13 +379,23 @@ void create_region_stats(int R, int C, int A, int N, int T, float average_table[
 
             // calculo do desvio padrão
             double average = sum / (C * A);
-            double stddev = sqrt(sum_sq - (sum * sum) / (C * A));
+            double stddev = sqrt((sum_sq - (sum * sum) / (C * A)) / (C * A - 1));
 
             region_stats[i][0] = min;
             region_stats[i][1] = max;
             region_stats[i][2] = median;
             region_stats[i][3] = average;
             region_stats[i][4] = stddev;
+
+            // Atualiza a melhor região usando seção crítica para evitar race condition
+#pragma omp critical
+            {
+                if (average > *best_region_avg)
+                {
+                    *best_region_avg = average;
+                    *best_region_i = i;
+                }
+            }
         }
 
         // 4. Cada thread libera sua memória ao finalizar toda a sua parte do trabalho
@@ -421,8 +448,8 @@ void create_brasil_stats(int R, int C, int A, int N, int T, float average_table[
             max = val;
     }
 
-    //float *temp_array_brasil = malloc((R * C * A) * sizeof(float));
-    // memcpy(temp_array_brasil, aux_array, (R * C * A) * sizeof(float));
+    // float *temp_array_brasil = malloc((R * C * A) * sizeof(float));
+    //  memcpy(temp_array_brasil, aux_array, (R * C * A) * sizeof(float));
     if ((R * C * A) % 2 == 0)
     {
         float m1 = quickselect(aux_array, 0, R * C * A - 1, R * C * A / 2);
@@ -434,7 +461,7 @@ void create_brasil_stats(int R, int C, int A, int N, int T, float average_table[
     {
         median = quickselect(aux_array, 0, R * C * A - 1, R * C * A / 2);
     }
-    //free(temp_array_brasil);
+    // free(temp_array_brasil);
     median = aux_array[R * C * A / 2];
 
     // calculo do desvio padrão e da média
@@ -619,135 +646,152 @@ void gera_premiacao(int R, int C, int A, int N, int T, float average_table[R][C]
  * @param argv Vetor de argumentos.
  * @return Código de saída do programa.
  */
-int main() {
+int main()
+{
     const int NUM_THREADS_MIN = 1;
     const int NUM_THREADS_MAX = 12;
-    
-    FILE* arquivoParametros = NULL;
-    FILE* arquivoSaidaTabela = NULL;
-    
+
+    FILE *arquivoParametros = NULL;
+    FILE *arquivoSaidaTabela = NULL;
+
     long parametrosR[MAX_LINHAS_CSV], parametrosC[MAX_LINHAS_CSV];
     long parametrosA[MAX_LINHAS_CSV], parametrosN[MAX_LINHAS_CSV];
     int parametrosSeed[MAX_LINHAS_CSV];
     int numConfiguracoes = 0;
-    
+
     printf("=== Leitura de Configurações do CSV ===\n\n");
-    
+
     arquivoParametros = fopen(ARQ_PARAMETROS_TABELAS, "r");
-    if(arquivoParametros == NULL){
+    if (arquivoParametros == NULL)
+    {
         printf("Erro ao abrir arquivo de configurações: %s\n", ARQ_PARAMETROS_TABELAS);
         return 1;
     }
-    
+
     char linha[256];
-    if(fgets(linha, sizeof(linha), arquivoParametros) == NULL){
+    if (fgets(linha, sizeof(linha), arquivoParametros) == NULL)
+    {
         fclose(arquivoParametros);
         return 1;
     }
-    
-    while(fgets(linha, sizeof(linha), arquivoParametros) != NULL && numConfiguracoes < MAX_LINHAS_CSV){
-        if(sscanf(linha, "%ld,%ld,%ld,%ld,%d", 
-                  &parametrosR[numConfiguracoes], &parametrosC[numConfiguracoes], 
-                  &parametrosA[numConfiguracoes], &parametrosN[numConfiguracoes], 
-                  &parametrosSeed[numConfiguracoes]) == 5){
+
+    while (fgets(linha, sizeof(linha), arquivoParametros) != NULL && numConfiguracoes < MAX_LINHAS_CSV)
+    {
+        if (sscanf(linha, "%ld,%ld,%ld,%ld,%d",
+                   &parametrosR[numConfiguracoes], &parametrosC[numConfiguracoes],
+                   &parametrosA[numConfiguracoes], &parametrosN[numConfiguracoes],
+                   &parametrosSeed[numConfiguracoes]) == 5)
+        {
             numConfiguracoes++;
         }
     }
     fclose(arquivoParametros);
-    
+
     printf("Total de configurações carregadas: %d\n", numConfiguracoes);
     printf("Iniciando testes (Threads de %d a %d)...\n\n", NUM_THREADS_MIN, NUM_THREADS_MAX);
-    
+
     arquivoSaidaTabela = fopen(ARQ_SAIDA_TABELA, "w");
-    if(arquivoSaidaTabela == NULL) return 1;
-    
+    if (arquivoSaidaTabela == NULL)
+        return 1;
+
     // Cabeçalho com a nova coluna "Threads"
     fprintf(arquivoSaidaTabela, "R,C,A,N,Threads");
-    const char* nomesProcessos[] = {"Analise0", "Analise1", "Analise2", "Analise3", "Analise4", "Analise5"};
-    for(int proc = 0; proc < NUM_PROCESSOS_ANALISE; proc++){
+    const char *nomesProcessos[] = {"Analise0", "Analise1", "Analise2", "Analise3", "Analise4", "Analise5"};
+    for (int proc = 0; proc < NUM_PROCESSOS_ANALISE; proc++)
+    {
         fprintf(arquivoSaidaTabela, ",%s_Media(us),%s_DevPad(us)", nomesProcessos[proc], nomesProcessos[proc]);
     }
     fprintf(arquivoSaidaTabela, ",Total_Media(us),Total_DevPad(us)\n");
     fclose(arquivoSaidaTabela);
-    
-    for(int config = 0; config < numConfiguracoes; config++){
+
+    for (int config = 0; config < numConfiguracoes; config++)
+    {
         long R = parametrosR[config], C = parametrosC[config], A = parametrosA[config], N = parametrosN[config];
         int seed = parametrosSeed[config];
 
         printf("Processando Configuração %d (R=%ld, C=%ld, A=%ld, N=%ld)...\n", config + 1, R, C, A, N);
-        
+
         // Alocação dinâmica única para a configuração
         float (*avaliation_table)[C][A][N] = malloc(sizeof(float[R][C][A][N]));
         float (*average_table)[C][A] = malloc(sizeof(float[R][C][A]));
-        float (*city_stats)[C][5] = malloc(sizeof(float[R][C][5])); 
-        float (*region_stats)[5] = malloc(sizeof(float[R][5]));     
-        float *brasil_stats = malloc(5 * sizeof(float));            
+        float (*city_stats)[C][5] = malloc(sizeof(float[R][C][5]));
+        float (*region_stats)[5] = malloc(sizeof(float[R][5]));
+        float *brasil_stats = malloc(5 * sizeof(float));
 
-        if (!avaliation_table || !average_table) {
+        if (!avaliation_table || !average_table)
+        {
             printf("Erro de memória. Pulando...\n");
             continue;
         }
 
         // Geração da tabela base (com T=1 pois é apenas a geração dos dados)
         create_avaliation_table(R, C, A, N, 1, seed, avaliation_table);
-        
+
         // Matriz para guardar os resultados de cada número de threads para esta configuração
         // Estrutura: [Threads][Execucao][Processo]
         // Como varia de 1 a 12, usaremos threads-1 como índice
         double temposAnalises[NUM_THREADS_MAX][NUM_EXECUCOES][NUM_PROCESSOS_ANALISE];
 
-        for(int t = NUM_THREADS_MIN; t <= NUM_THREADS_MAX; t++){
-            if(DEBUG) printf("  -> Testando com %d threads...\n", t);
-            
-            for(int i = 0; i < NUM_EXECUCOES; i++){
+        for (int t = NUM_THREADS_MIN; t <= NUM_THREADS_MAX; t++)
+        {
+            if (DEBUG)
+                printf("  -> Testando com %d threads...\n", t);
+
+            for (int i = 0; i < NUM_EXECUCOES; i++)
+            {
+
                 double start, end;
+                int best_city_i, best_city_j, best_region_i;
+                float best_city_avg, best_region_avg;
 
                 // Analise 0: Average Table
                 start = omp_get_wtime();
                 create_average_table(R, C, A, N, t, avaliation_table, average_table);
                 end = omp_get_wtime();
-                temposAnalises[t-1][i][0] = (end - start) * 1000000.0;
+                temposAnalises[t - 1][i][0] = (end - start) * 1000000.0;
 
                 // Analise 1: City Stats
                 start = omp_get_wtime();
-                create_city_stats(R, C, A, N, t, average_table, city_stats);
+                create_city_stats(R, C, A, N, t, average_table, city_stats,
+                                  &best_city_i, &best_city_j, &best_city_avg);
                 end = omp_get_wtime();
-                temposAnalises[t-1][i][1] = (end - start) * 1000000.0;
+                temposAnalises[t - 1][i][1] = (end - start) * 1000000.0;
 
                 // Analise 2: Region Stats
                 start = omp_get_wtime();
-                create_region_stats(R, C, A, N, t, average_table, region_stats);
+                create_region_stats(R, C, A, N, t, average_table, region_stats,
+                                    &best_region_i, &best_region_avg);
                 end = omp_get_wtime();
-                temposAnalises[t-1][i][2] = (end - start) * 1000000.0;
+                temposAnalises[t - 1][i][2] = (end - start) * 1000000.0;
 
                 // Analise 3: Brasil Stats
                 start = omp_get_wtime();
                 create_brasil_stats(R, C, A, N, t, average_table, brasil_stats);
                 end = omp_get_wtime();
-                temposAnalises[t-1][i][3] = (end - start) * 1000000.0;
+                temposAnalises[t - 1][i][3] = (end - start) * 1000000.0;
 
                 // Analise 4: Premiação
-                start = omp_get_wtime();
-                gera_premiacao(R, C, A, N, t, average_table, city_stats, region_stats, brasil_stats);
-                end = omp_get_wtime();
-                temposAnalises[t-1][i][4] = (end - start) * 1000000.0;
+                temposAnalises[t - 1][i][4] = 0.0;
 
                 // Analise 5: Extra/Livre
-                temposAnalises[t-1][i][5] = 0.0;
+                temposAnalises[t - 1][i][5] = 0.0;
             }
         }
 
         // Escrita dos resultados desta configuração para todas as threads
         arquivoSaidaTabela = fopen(ARQ_SAIDA_TABELA, "a");
-        for(int t = NUM_THREADS_MIN; t <= NUM_THREADS_MAX; t++){
+        for (int t = NUM_THREADS_MIN; t <= NUM_THREADS_MAX; t++)
+        {
             fprintf(arquivoSaidaTabela, "%ld,%ld,%ld,%ld,%d", R, C, A, N, t);
-            
+
             double temposTotais[NUM_EXECUCOES];
-            
-            for(int proc = 0; proc < NUM_PROCESSOS_ANALISE; proc++){
+
+            for (int proc = 0; proc < NUM_PROCESSOS_ANALISE; proc++)
+            {
                 double amostrasProc[NUM_EXECUCOES];
-                for(int exec = 0; exec < NUM_EXECUCOES; exec++){
-                    amostrasProc[exec] = temposAnalises[t-1][exec][proc];
+                for (int exec = 0; exec < NUM_EXECUCOES; exec++)
+                {
+                    amostrasProc[exec] = temposAnalises[t - 1][exec][proc];
                 }
                 double m = calcularMedia(amostrasProc, NUM_EXECUCOES);
                 double d = calcularDesvioPadrao(amostrasProc, NUM_EXECUCOES, m);
@@ -755,9 +799,11 @@ int main() {
             }
 
             // Cálculo do Total
-            for(int exec = 0; exec < NUM_EXECUCOES; exec++){
+            for (int exec = 0; exec < NUM_EXECUCOES; exec++)
+            {
                 double somaTotal = 0;
-                for(int proc = 0; proc < NUM_PROCESSOS_ANALISE; proc++) somaTotal += temposAnalises[t-1][exec][proc];
+                for (int proc = 0; proc < NUM_PROCESSOS_ANALISE; proc++)
+                    somaTotal += temposAnalises[t - 1][exec][proc];
                 temposTotais[exec] = somaTotal;
             }
             double mt = calcularMedia(temposTotais, NUM_EXECUCOES);
@@ -765,9 +811,13 @@ int main() {
             fprintf(arquivoSaidaTabela, ",%.2f,%.2f\n", mt, dt);
         }
         fclose(arquivoSaidaTabela);
-        
+
         // Liberação de memória antes da próxima configuração de R,C,A,N
-        free(avaliation_table); free(average_table); free(city_stats); free(region_stats); free(brasil_stats);
+        free(avaliation_table);
+        free(average_table);
+        free(city_stats);
+        free(region_stats);
+        free(brasil_stats);
     }
 
     printf("\nBenchmark concluído com sucesso. Resultados em %s\n", ARQ_SAIDA_TABELA);
