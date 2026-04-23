@@ -22,6 +22,28 @@
 #include <time.h>
 #include <omp.h>
 
+#define MAX_LINHAS_CSV 100
+#define NUM_EXECUCOES 10
+#define NUM_PROCESSOS_ANALISE 5
+#define ARQ_PARAMETROS_TABELAS "parametros.csv"
+#define ARQ_SAIDA_TABELA "resultados_desempenho.csv"
+#define DEBUG 1
+
+// Funções utilitárias para estatística
+double calcularMedia(double tempos[], int n) {
+    double soma = 0.0;
+    for(int i = 0; i < n; i++) soma += tempos[i];
+    return soma / n;
+}
+
+double calcularDesvioPadrao(double tempos[], int n, double media) {
+    double soma_quadrados = 0.0;
+    for(int i = 0; i < n; i++) {
+        soma_quadrados += (tempos[i] - media) * (tempos[i] - media);
+    }
+    return n > 1 ? sqrt(soma_quadrados / (n - 1)) : 0.0;
+}
+
 /**
  * @brief Lê e valida os parâmetros de entrada do programa.
  *
@@ -595,60 +617,205 @@ void gera_premiacao(int R, int C, int A, int N, int T, float average_table[R][C]
  * @param argv Vetor de argumentos.
  * @return Código de saída do programa.
  */
-int main(int argc, char *argv[])
-{
-    int R, C, A, N, T, SEED;
-    double tempo_execucao;
-    double start;
-    double end;
-
-    if (!input_data(argc, argv, &R, &C, &A, &N, &T, &SEED))
-    {
-        printf("Erro na leitura dos dados\n");
-        return 0;
+int main(int argc, char *argv[]){
+    // Captura o número de threads via terminal (padrão é 1)
+    int T = 1;
+    if (argc > 1) {
+        T = atoi(argv[1]);
     }
+    
+    FILE* arquivoParametros = NULL;
+    FILE* arquivoSaidaTabela = NULL;
+    
+    // Arrays para armazenar os parâmetros de cada linha do CSV
+    long parametrosR[MAX_LINHAS_CSV];
+    long parametrosC[MAX_LINHAS_CSV];
+    long parametrosA[MAX_LINHAS_CSV];
+    long parametrosN[MAX_LINHAS_CSV];
+    int parametrosSeed[MAX_LINHAS_CSV];
+    int numConfiguracoes = 0;
+    
+    printf("=== Leitura de Configurações do CSV ===\n\n");
+    
+    // Abertura do arquivo de parâmetros
+    arquivoParametros = fopen(ARQ_PARAMETROS_TABELAS, "r");
+    if(arquivoParametros == NULL){
+        printf("Erro ao abrir arquivo de configurações: %s\n", ARQ_PARAMETROS_TABELAS);
+        return 1;
+    }
+    
+    char linha[256];
+    
+    // Leitura do cabeçalho
+    if(fgets(linha, sizeof(linha), arquivoParametros) == NULL){
+        printf("Erro ao ler cabeçalho do arquivo CSV\n");
+        fclose(arquivoParametros);
+        return 1;
+    }
+    
+    // Leitura das configurações do CSV
+    while(fgets(linha, sizeof(linha), arquivoParametros) != NULL && numConfiguracoes < MAX_LINHAS_CSV){
+        if(sscanf(linha, "%ld,%ld,%ld,%ld,%d", 
+                  &parametrosR[numConfiguracoes], 
+                  &parametrosC[numConfiguracoes], 
+                  &parametrosA[numConfiguracoes], 
+                  &parametrosN[numConfiguracoes], 
+                  &parametrosSeed[numConfiguracoes]) == 5){
+            printf("Configuração %d: R=%ld, C=%ld, A=%ld, N=%ld, Seed=%d\n", 
+                   numConfiguracoes + 1, parametrosR[numConfiguracoes], parametrosC[numConfiguracoes],
+                   parametrosA[numConfiguracoes], parametrosN[numConfiguracoes], parametrosSeed[numConfiguracoes]);
+            numConfiguracoes++;
+        }
+    }
+    fclose(arquivoParametros);
+    
+    printf("\nTotal de configurações carregadas: %d\n\n", numConfiguracoes);
+    printf("=== Teste de Desempenho (Threads: %d) ===\n\n", T);
+    
+    // Abertura do arquivo de saída (primeira vez, modo escrita)
+    arquivoSaidaTabela = fopen(ARQ_SAIDA_TABELA, "w");
+    if(arquivoSaidaTabela == NULL){
+        printf("Erro ao abrir arquivo de saída: %s\n", ARQ_SAIDA_TABELA);
+        return 1;
+    }
+    
+    // Escrita do cabeçalho CSV no arquivo de saída
+    fprintf(arquivoSaidaTabela, "R,C,A,N");
+    const char* nomesProcessos[] = {
+        "Analise0", "Analise1", "Analise2", "Analise3", "Analise4", "Analise5"
+    };
+    for(int proc = 0; proc < NUM_PROCESSOS_ANALISE; proc++){
+        fprintf(arquivoSaidaTabela, ",%s_Media(us),%s_DevPad(us)", nomesProcessos[proc], nomesProcessos[proc]);
+    }
+    fprintf(arquivoSaidaTabela, ",Total_Media(us),Total_DevPad(us)\n");
+    fclose(arquivoSaidaTabela);
+    
+    // Loop para cada configuração de parâmetros
+    for(int config = 0; config < numConfiguracoes; config++){
+        long R = parametrosR[config];
+        long C = parametrosC[config];
+        long A = parametrosA[config];
+        long N = parametrosN[config];
+        int seed = parametrosSeed[config];
 
-    float (*avaliation_table)[C][A][N] = malloc(sizeof(float[R][C][A][N]));
-    float (*average_table)[C][A] = malloc(sizeof(float[R][C][A]));
-    float (*city_stats)[C][5] = malloc(sizeof(float[R][C][5])); // 0: min, 1: max, 2: median ,3: average, 4: stddev
-    float (*region_stats)[5] = malloc(sizeof(float[R][5]));     // 0: min, 1: max, 2: median ,3: average, 4: stddev
-    float *brasil_stats = malloc(5 * sizeof(float));            // 0: min, 1: max, 2: median ,3: average, 4: stddev
+        printf("Processando Configuração %d (R=%ld, C=%ld, A=%ld, N=%ld)...\n", 
+               config + 1, R, C, A, N);
+        
+        // Alocação de memória baseada na configuração atual
+        float (*avaliation_table)[C][A][N] = malloc(sizeof(float[R][C][A][N]));
+        float (*average_table)[C][A] = malloc(sizeof(float[R][C][A]));
+        float (*city_stats)[C][5] = malloc(sizeof(float[R][C][5])); 
+        float (*region_stats)[5] = malloc(sizeof(float[R][5]));     
+        float *brasil_stats = malloc(5 * sizeof(float));            
 
-    if (!avaliation_table || !average_table || !city_stats || !region_stats || !brasil_stats)
-    {
-        printf("Erro na alocação de memória\n");
+        if (!avaliation_table || !average_table || !city_stats || !region_stats || !brasil_stats) {
+            printf("Erro na alocação de memória para a Configuração %d. Pulando...\n", config + 1);
+            free(avaliation_table); free(average_table); free(city_stats); free(region_stats); free(brasil_stats);
+            continue;
+        }
+
+        // Geração de notas aleatórias UMA VEZ para esta configuração
+        printf("  Gerando dados iniciais...\n");
+        create_avaliation_table(R, C, A, N, T, seed, avaliation_table);
+        
+        // Matriz para armazenar os tempos [Execucao][Processo]
+        double benchmark[NUM_EXECUCOES][NUM_PROCESSOS_ANALISE];
+        double temposPorExecutacao[NUM_EXECUCOES];
+        
+        if(DEBUG){
+            printf("  Executando análises (%d repetições)...\n", NUM_EXECUCOES);
+        }
+        
+        // Execução do programa NUM_EXECUCOES vezes
+        for(int i = 0; i < NUM_EXECUCOES; i++){
+            double start, end;
+
+            // Analise 0: Average Table
+            start = omp_get_wtime();
+            create_average_table(R, C, A, N, T, avaliation_table, average_table);
+            end = omp_get_wtime();
+            benchmark[i][0] = (end - start) * 1000000.0;
+
+            // Analise 1: City Stats
+            start = omp_get_wtime();
+            create_city_stats(R, C, A, N, T, average_table, city_stats);
+            end = omp_get_wtime();
+            benchmark[i][1] = (end - start) * 1000000.0;
+
+            // Analise 2: Region Stats
+            start = omp_get_wtime();
+            create_region_stats(R, C, A, N, T, average_table, region_stats);
+            end = omp_get_wtime();
+            benchmark[i][2] = (end - start) * 1000000.0;
+
+            // Analise 3: Brasil Stats
+            start = omp_get_wtime();
+            create_brasil_stats(R, C, A, N, T, average_table, brasil_stats);
+            end = omp_get_wtime();
+            benchmark[i][3] = (end - start) * 1000000.0;
+
+            // Analise 4: Premiação
+            start = omp_get_wtime();
+            gera_premiacao(R, C, A, N, T, average_table, city_stats, region_stats, brasil_stats);
+            end = omp_get_wtime();
+            benchmark[i][4] = (end - start) * 1000000.0;
+
+            // Analise 5: Não utilizado nesta etapa (mantido para compatibilidade com CSV)
+            benchmark[i][5] = 0.0;
+        }
+        
+        // Armazenamento dos tempos totais de cada uma das NUM_EXECUCOES
+        for(int i = 0; i < NUM_EXECUCOES; i++){
+            double tempoTotalExecucao = 0.0;
+            for(int j = 0; j < NUM_PROCESSOS_ANALISE; j++){
+                tempoTotalExecucao += benchmark[i][j];
+            }
+            temposPorExecutacao[i] = tempoTotalExecucao;
+        }
+        
+        // Cálculo de média e desvio padrão por processo
+        double mediasProcessos[NUM_PROCESSOS_ANALISE];
+        double deviosProcessos[NUM_PROCESSOS_ANALISE];
+        for(int proc = 0; proc < NUM_PROCESSOS_ANALISE; proc++){
+            double temposProcesso[NUM_EXECUCOES];
+            for(int exec = 0; exec < NUM_EXECUCOES; exec++){
+                temposProcesso[exec] = benchmark[exec][proc];
+            }
+            mediasProcessos[proc] = calcularMedia(temposProcesso, NUM_EXECUCOES);
+            deviosProcessos[proc] = calcularDesvioPadrao(temposProcesso, NUM_EXECUCOES, mediasProcessos[proc]);
+        }
+        
+        // Cálculo de média e desvio padrão do tempo total
+        double mediaTotal = calcularMedia(temposPorExecutacao, NUM_EXECUCOES);
+        double desvioTotal = calcularDesvioPadrao(temposPorExecutacao, NUM_EXECUCOES, mediaTotal);
+        
+        // Desalocação dinâmica após o término das repetições
         free(avaliation_table);
         free(average_table);
         free(city_stats);
         free(region_stats);
         free(brasil_stats);
-        return 1;
+        
+        // Abertura do arquivo em modo append
+        arquivoSaidaTabela = fopen(ARQ_SAIDA_TABELA, "a");
+        if(arquivoSaidaTabela == NULL){
+            printf("Erro ao abrir arquivo de saída para escrita: %s\n", ARQ_SAIDA_TABELA);
+            return 1;
+        }
+        
+        // Escrita dos dados desta configuração
+        fprintf(arquivoSaidaTabela, "%ld,%ld,%ld,%ld", R, C, A, N);
+        for(int proc = 0; proc < NUM_PROCESSOS_ANALISE; proc++){
+            fprintf(arquivoSaidaTabela, ",%.2f,%.2f", mediasProcessos[proc], deviosProcessos[proc]);
+        }
+        fprintf(arquivoSaidaTabela, ",%.2f,%.2f\n", mediaTotal, desvioTotal);
+        
+        fclose(arquivoSaidaTabela);
+        
+        printf("  Configuração %d salva no arquivo de saída!\n\n", config + 1);
     }
 
-    create_avaliation_table(R, C, A, N, T, SEED, avaliation_table);
-
-    start = omp_get_wtime();
-    create_average_table(R, C, A, N, T, avaliation_table, average_table);
-    create_city_stats(R, C, A, N, T, average_table, city_stats);
-    create_region_stats(R, C, A, N, T, average_table, region_stats);
-    create_brasil_stats(R, C, A, N, T, average_table, brasil_stats);
-    end = omp_get_wtime();
-
-    show_table(R, C, A, N, avaliation_table);
-    show_average_table(R, C, A, average_table);
-    show_city_stats(R, C, city_stats);
-    show_region_stats(R, region_stats);
-    show_brasil_stats(brasil_stats);
-    gera_premiacao(R, C, A, N, T, average_table, city_stats, region_stats, brasil_stats);
-
-    tempo_execucao = (end - start); // Calcula o tempo de execução
-    printf("Tempo de execução: %.6f segundos\n", tempo_execucao);
-
-    free(avaliation_table);
-    free(average_table);
-    free(city_stats);
-    free(region_stats);
-    free(brasil_stats);
-
+    printf("Tabela de resultados salva em %s\n", ARQ_SAIDA_TABELA);
+    
     return 0;
 }

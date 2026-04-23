@@ -1,1 +1,0 @@
-# Codigo_Trabalho1_CAD_2026
