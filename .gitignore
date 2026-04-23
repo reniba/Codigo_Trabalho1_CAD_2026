@@ -1,0 +1,15 @@
+# Executáveis e bibliotecas dinâmicas
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Binários compilados (Java/C#)
+*.class
+*.jar
+*.war
+*.bin
+
+# Outros formatos comuns
+*.o
+*.objCopied!   
