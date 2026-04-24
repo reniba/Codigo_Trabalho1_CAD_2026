@@ -8,8 +8,7 @@
  * @author Vitor Alexandre Garcia Vaz (14611432)
  *
  * @attention O código exige a leitura de um arquivo de entrada, contendo os parâmetros de execução
- *            do programa, e o caminho para esse arquivo deve ser especificado na macro ARQ_DIR,
- *            presente no início do código (na seção de Defines).
+ *            do programa, e o caminho para esse arquivo deve ser especificado no Makefile,
  * @attention O código foi desenvolvido com uso da biblioteca de matemática math.h, pressupondo
  *            assim, para a execução do programa, o uso da flag -lm.
  */
@@ -23,6 +22,18 @@
 #include <omp.h>
 #include <stdbool.h>
 
+/**
+ * @brief Lê os parâmetros de execução do programa a partir de um arquivo de texto.
+ *
+ * @param filaname Caminho do arquivo de entrada contendo os parâmetros.
+ * @param R Índice inicial do segmento.
+ * @param C Índice final do segmento.
+ * @param A Posição desejada (0-based) do elemento.
+ * @param N Número de avaliações por atividade.
+ * @param T Número de threads para paralelização.
+ * @param SEED Semente para geração pseudoaleatória.
+ * @return true se a leitura foi bem-sucedida, false caso contrário.
+ */
 bool read_input_from_file(const char *filename, int *R, int *C, int *A, int *N, int *T, int *SEED)
 {
     // Tenta abrir o arquivo no modo de leitura ("r")
@@ -33,19 +44,15 @@ bool read_input_from_file(const char *filename, int *R, int *C, int *A, int *N, 
         return false;
     }
 
-    // Lê os 6 valores inteiros.
-    // fscanf retorna a quantidade de variáveis lidas com sucesso.
-    int itens_lidos = fscanf(file, "%d %d %d %d %d %d", R, C, A, N, T, SEED);
-
-    // Fecha o arquivo para liberar memória
-    fclose(file);
-
     // Valida se o arquivo tinha exatamente a quantidade de parâmetros esperada
+    int itens_lidos = fscanf(file, "%d %d %d %d %d %d", R, C, A, N, T, SEED);
     if (itens_lidos != 6)
     {
         printf("Erro: Arquivo com formato inválido. Esperados 6 valores, mas foram lidos %d.\n", itens_lidos);
         return false;
     }
+
+    fclose(file);
 
     return true;
 }
@@ -61,24 +68,28 @@ bool read_input_from_file(const char *filename, int *R, int *C, int *A, int *N, 
 int partition(float arr[], int low, int high)
 {
     float pivot = arr[high];
-    int i = low - 1;
+    int i = low - 1; // Índice do menor elemento
+
     for (int j = low; j < high; j++)
     {
+        // Se o elemento atual for menor ou igual ao pivô
         if (arr[j] <= pivot)
         {
             i++;
+            // Troca arr[i] com arr[j]
             float temp = arr[i];
             arr[i] = arr[j];
             arr[j] = temp;
         }
     }
+    // Posiciona o pivô no local correto: após os elementos menores
     float temp = arr[i + 1];
     arr[i + 1] = arr[high];
     arr[high] = temp;
+
     return i + 1;
 }
 
-// Quickselect recursivo para encontrar o k-ésimo menor elemento (0-based)
 /**
  * @brief Seleciona o k-ésimo menor elemento em um vetor.
  *
@@ -90,15 +101,20 @@ int partition(float arr[], int low, int high)
  */
 float quickselect(float arr[], int low, int high, int k)
 {
+    // Caso base: o vetor contém apenas um elemento
     if (low == high)
         return arr[low];
 
+    // Obtém o índice do pivô após a partição (pivô está na posição definitiva)
     int pivotIndex = partition(arr, low, high);
 
+    // Se o índice do pivô for exatamente o que procuramos (k)
     if (k == pivotIndex)
         return arr[k];
+    // Se k for menor, busca apenas na metade esquerda
     else if (k < pivotIndex)
         return quickselect(arr, low, pivotIndex - 1, k);
+    // Caso contrário, busca na metade direita
     else
         return quickselect(arr, pivotIndex + 1, high, k);
 }
@@ -118,7 +134,6 @@ float quickselect(float arr[], int low, int high, int k)
 int create_avaliation_table(int R, int C, int A, int N, int T, int SEED, float avaliation_table[R][C][A][N])
 {
     srand(SEED);
-
     for (int i = 0; i < R; i++)
     {
         for (int j = 0; j < C; j++)
@@ -148,7 +163,7 @@ int create_avaliation_table(int R, int C, int A, int N, int T, int SEED, float a
  */
 void create_average_table(int R, int C, int A, int N, int T, float avaliation_table[restrict R][C][A][N], float average_table[restrict R][C][A])
 {
-// para cada região, turma e atividade
+// para cada região, cidade e aluno
 #pragma omp parallel for num_threads(T) collapse(3)
     for (int i = 0; i < R; i++)
     {
@@ -188,14 +203,13 @@ void create_average_table(int R, int C, int A, int N, int T, float avaliation_ta
 void create_city_stats(int R, int C, int A, int N, int T, float average_table[restrict R][C][A], float city_stats[restrict R][C][5],
                        int *best_city_i, int *best_city_j, float *best_city_avg)
 {
-// Abre a região paralela sem iniciar o loop 'for' ainda
+// Abre a região paralela sem iniciar o loop 'for'
 #pragma omp parallel num_threads(T)
     {
-        // Cada thread aloca seu espaço de trabalho UMA ÚNICA VEZ
+        // Cada thread aloca seu espaço de trabalho uma única vez
         float *aux_array = malloc(A * sizeof(float));
-        float *temp_array = malloc(A * sizeof(float));
 
-        if (!aux_array || !temp_array)
+        if (!aux_array)
         {
             fprintf(stderr, "Erro na alocação de memória\n");
             exit(1);
@@ -213,7 +227,7 @@ void create_city_stats(int R, int C, int A, int N, int T, float average_table[re
                 double sum = 0.0f;
                 double sum_sq = 0.0f;
 
-// Reaproveita a memória alocada fora do loop
+                // Copia valores para array auxiliar e calcula soma/quadrados simultaneamente
 #pragma omp simd reduction(+ : sum, sum_sq)
                 for (int k = 0; k < A; k++)
                 {
@@ -239,7 +253,7 @@ void create_city_stats(int R, int C, int A, int N, int T, float average_table[re
                     median = quickselect(aux_array, 0, A - 1, A / 2); // procura o A/2 menor elemento
                 }
 
-                // calculo do desvio padrão e da média e armazenamento dos resultados
+                // calculo do desvio padrão amostral e da média
                 double average = sum / A;
                 float stddev = sqrt((sum_sq - (sum * sum) / A) / (A - 1));
                 city_stats[i][j][0] = min;
@@ -261,9 +275,8 @@ void create_city_stats(int R, int C, int A, int N, int T, float average_table[re
             }
         }
 
-        // Libera a memória no final da região paralela (apenas T vezes)
+        // Libera a memória no final da região paralela
         free(aux_array);
-        free(temp_array);
     }
 }
 
@@ -284,42 +297,35 @@ void create_city_stats(int R, int C, int A, int N, int T, float average_table[re
 void create_region_stats(int R, int C, int A, int N, int T, float average_table[restrict R][C][A], float region_stats[restrict R][5],
                          int *best_region_i, float *best_region_avg)
 {
-// 1. Abre a região paralela (cria as T threads, mas ainda não inicia o loop)
+// Abre a região paralela criando as T threads
 #pragma omp parallel num_threads(T)
     {
-        // 2. Cada thread faz UMA única alocação no Heap para processar todas as regiões que receber
+        // Cada thread faz UMA única alocação no Heap para processar todas as regiões que receber
         float *aux_array = malloc((C * A) * sizeof(float));
-        float *temp_array_region = malloc((C * A) * sizeof(float));
 
-        if (!aux_array || !temp_array_region)
+        if (!aux_array)
         {
             fprintf(stderr, "Erro na alocação de memória auxiliar\n");
             exit(1);
         }
 
-// 3. Divide o loop das regiões (R) entre as threads criadas
+// Divide o loop das regiões (R) entre as threads criadas
 #pragma omp for
         for (int i = 0; i < R; i++)
         {
-            // inicialização das variáveis estatísticas
             float min = average_table[i][0][0];
             float max = average_table[i][0][0];
             float median;
-
-            // Otimização: Mudei 'sum' para double. Como C * A pode ser um número grande,
-            // usar float para o somatório causaria perda de precisão (catastrophic cancellation).
             double sum = 0.0;
             double sum_sq = 0.0;
 
+            // Reaproveita a memória alocada fora do loop para ler os valores da região i e calcular soma/quadrados simultaneamente
             float *ptr_start = &average_table[i][0][0];
-
 #pragma omp simd reduction(+ : sum, sum_sq)
             for (int j = 0; j < C * A; j++)
             {
                 float val = *(ptr_start + j);
-
                 aux_array[j] = val;
-
                 sum += val;
                 sum_sq += (val * val);
                 if (val < min)
@@ -340,10 +346,9 @@ void create_region_stats(int R, int C, int A, int N, int T, float average_table[
                 median = quickselect(aux_array, 0, C * A - 1, C * A / 2);
             }
 
-            // calculo do desvio padrão
+            // calculo do desvio padrão amostral e da média
             double average = sum / (C * A);
             double stddev = sqrt((sum_sq - (sum * sum) / (C * A)) / (C * A - 1));
-
             region_stats[i][0] = min;
             region_stats[i][1] = max;
             region_stats[i][2] = median;
@@ -361,9 +366,8 @@ void create_region_stats(int R, int C, int A, int N, int T, float average_table[
             }
         }
 
-        // 4. Cada thread libera sua memória ao finalizar toda a sua parte do trabalho
+        // Cada thread libera sua memória ao finalizar toda a sua parte do trabalho
         free(aux_array);
-        free(temp_array_region);
     }
 }
 
@@ -380,7 +384,6 @@ void create_region_stats(int R, int C, int A, int N, int T, float average_table[
  */
 void create_brasil_stats(int R, int C, int A, int N, int T, float average_table[restrict R][C][A], float brasil_stats[5])
 {
-    // inicialização das variáveis estatísticas
     float min = average_table[0][0][0];
     float max = average_table[0][0][0];
     float median;
@@ -411,7 +414,7 @@ void create_brasil_stats(int R, int C, int A, int N, int T, float average_table[
             max = val;
     }
 
-    // float *temp_array_brasil = malloc((R * C * A) * sizeof(float));
+    // cálculo da mediana usando quickselect (reaproveitando a memória alocada para o array auxiliar)
     if ((R * C * A) % 2 == 0)
     {
         float m1 = quickselect(aux_array, 0, R * C * A - 1, R * C * A / 2);
@@ -423,12 +426,9 @@ void create_brasil_stats(int R, int C, int A, int N, int T, float average_table[
         median = quickselect(aux_array, 0, R * C * A - 1, R * C * A / 2);
     }
 
-    // calculo do desvio padrão e da média
+    // calculo do desvio padrão amostral e da média
     double average = sum / (R * C * A);
-    double stddev = sqrt((sum_sq - (sum * sum) / (R * C * A)) / (R * C * A - 1));
-
-    // Armazenamento dos resultados na matriz de saída e liberação da memória auxiliar
-    brasil_stats[0] = min;
+    double stddev = sqrt((sum_sq - (sum * sum) / (R * C * A)) / (R * C * A - 1));    brasil_stats[0] = min;
     brasil_stats[1] = max;
     brasil_stats[2] = median;
     brasil_stats[3] = average;
@@ -570,8 +570,8 @@ void show_brasil_stats(float brasil_stats[5])
 /**
  * @brief Exibe na tela os resultados da premiação formatados.
  */
-void printa_premiacao(int best_city_i, int best_city_j, float best_city_avg,
-                      int best_region_i, float best_region_avg)
+void print_awards(int best_city_i, int best_city_j, float best_city_avg,
+                  int best_region_i, float best_region_avg)
 {
     printf("\n%-15s\tReg/Cid\t\tMedia Arit\n", "Premiação");
     printf("Melhor região:\tR%d\t\t%.1f\n", best_region_i, best_region_avg);
@@ -588,7 +588,7 @@ void printa_premiacao(int best_city_i, int best_city_j, float best_city_avg,
 int main(int argc, char *argv[])
 {
     int R, C, A, N, T, SEED;
-    double tempo_execucao;
+    double runtime;
     double start;
     double end;
 
@@ -639,11 +639,11 @@ int main(int argc, char *argv[])
     show_city_stats(R, C, city_stats);
     show_region_stats(R, region_stats);
     show_brasil_stats(brasil_stats);
-    printa_premiacao(best_city_i, best_city_j, best_city_avg,
-                     best_region_i, best_region_avg);
+    print_awards(best_city_i, best_city_j, best_city_avg,
+                 best_region_i, best_region_avg);
 
-    tempo_execucao = (end - start); // Calcula o tempo de execução
-    printf("Tempo de execução: %.6f segundos\n", tempo_execucao);
+    runtime = (end - start); // Calcula o tempo de execução
+    printf("Tempo de execução: %.6f segundos\n", runtime);
 
     free(avaliation_table);
     free(average_table);
